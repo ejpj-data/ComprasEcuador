@@ -1,0 +1,261 @@
+---
+title: "EDA - Compras Públicas en Ecuador"
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(arrow)
+library(readr)
+library(tidyverse)
+library(skimr)
+library(caret)
+library(ggcorrplot)
+```
+
+
+### Leer el paquete de datos
+
+```{r}
+datos <- read_parquet("datos_clean.parquet")
+```
+
+
+```{r}
+datos <- datos |> 
+  drop_na()
+```
+
+
+```{r}
+datos <- datos |>
+  rename(id_entidad = id_entidad.x, fecha = fecha_entrega) |>
+  select(-c(precio_ref_lic))|>
+  mutate(
+    ano = year(fecha),
+    mes = month(fecha),
+    quart = quarter(fecha),
+    semestre = semester(fecha)
+  )|>
+  mutate(
+    tercio = ifelse(mes<=4, 1, ifelse(mes<=8, 2, 3))
+  )
+```
+
+```{r}
+datos <- datos |> 
+  mutate(
+    competencia = ifelse(estrategia=="direct", FALSE, TRUE),
+    ahorro = ifelse(precio_adj<precio_ref, TRUE, FALSE)
+  )
+```
+
+```{r}
+datos <- datos |>
+  separate(justificacion, c("justificacion", "otro"), " – ") |> 
+  select(-c(otro))
+```
+
+```{r}
+datos<- datos |> 
+  mutate(
+    ahorros = precio_ref-precio_adj
+  )
+```
+
+
+
+
+```{r}
+skim_without_charts(datos)
+```
+
+
+```{r}
+datos |> 
+  ggplot(aes(x=ano)) + geom_bar()
+```
+
+
+```{r}
+datos |> 
+  ggplot(aes(x=estrategia, fill=ahorro)) + 
+  geom_bar()
+```
+
+```{r}
+datos |> 
+  ggplot(aes(x=categoria, fill=ahorro)) + 
+  geom_bar()
+```
+
+```{r}
+datos |> 
+  group_by(justificacion) |> 
+  summarize(n=n())
+```
+
+```{r}
+datos_norm <- datos |> 
+  select(c( estrategia, categoria, justificacion, precio_adj, precio_ref, ahorro, competencia)) |> 
+  mutate(
+    estrategia = as.factor(estrategia),
+    categoria = as.factor(categoria),
+    ahorro = as.factor(ahorro),
+    competencia = as.factor(competencia),
+    justificacion = as.factor(justificacion)
+  )
+  
+```
+
+
+```{r}
+datos_norm[sapply(datos_norm, is.factor)] <- data.matrix(datos_norm[sapply(datos_norm, is.factor)])
+```
+
+
+
+```{r}
+round(cor(datos_norm),2) |> 
+  ggcorrplot( 
+           hc.order = FALSE, 
+           outline.col = "white",
+           type = "upper",
+           ggtheme = ggplot2::theme_gray,
+           colors = c("#E46726", "white", "#6D9EC1"),
+           lab = TRUE
+           )
+```
+
+
+
+
+## Modelo Lineal precios
+
+```{r}
+set.seed(1)
+train_index <- createDataPartition(datos$precio_ref, p=0.8, list = FALSE)
+train_datos <- datos[train_index, ]
+test_datos <- datos[-train_index, ]
+```
+
+
+```{r}
+modelo_lineal <- lm(precio_adj ~ precio_ref, data = train_datos)
+
+summary(modelo_lineal)
+```
+
+
+
+```{r}
+predic <- predict(modelo_lineal, newdata = test_datos)
+```
+
+```{r}
+actuals <- test_datos$precio_adj
+mse <- mean((predic - actuals)^2)
+rmse <- sqrt(mse)
+rsquared <- cor(predic, actuals)^2
+```
+
+```{r}
+cat("MSE:", mse, "\n")
+cat("RMSE:", rmse, "\n")
+cat("R^2:", rsquared, "\n")
+```
+
+```{r}
+test_datos$predic <- predic
+```
+
+
+
+```{r}
+test_datos |> 
+ ggplot(aes(x = precio_ref)) +
+  geom_smooth(aes(y = precio_adj, color='precio_adj'))+
+  geom_smooth(aes(y = predic, color='prediccion'))
+```
+
+
+
+
+
+## Regresion Logistica
+
+```{r}
+set.seed(1)
+train_index <- createDataPartition(datos$ahorro, p=0.7, list = FALSE)
+train_datos <- datos[train_index, ]
+test_datos <- datos[-train_index, ]
+```
+
+
+```{r}
+reg_log <- glm(ahorro ~ categoria + estrategia, data = train_datos, family = binomial)
+summary(reg_log)
+```
+
+
+```{r}
+pred_proba <- predict(reg_log, type = "response")
+pred_clases <- ifelse(pred_proba > 0.5, TRUE, FALSE)
+mat_confusion <- table(train_datos$ahorro, pred_clases)
+print(mat_confusion)
+```
+
+```{r}
+mat_confusion/sum(mat_confusion)
+```
+
+
+
+```{r}
+precision <- sum(diag(mat_confusion)) / sum(mat_confusion)
+print(paste("Precision:", precision))
+```
+
+
+```{r}
+pred_test <- predict(reg_log, newdata = test_datos)
+clases_test <- ifelse(pred_test > 0.5, TRUE, FALSE)
+```
+
+
+```{r}
+mat_confusion <- table(test_datos$ahorro, clases_test)
+print(mat_confusion)
+```
+
+```{r}
+precision <- sum(diag(mat_confusion)) / sum(mat_confusion)
+print(paste("Precision:", precision))
+```
+
+
+
+```{r}
+std_coefs <- summary(reg_log)$coefficients[, 1]
+```
+
+
+```{r}
+importance_matrix <- data.frame(
+  Predictor = names(std_coefs),
+  Standardized_Coefficient = std_coefs
+)
+# print(importance_matrix)
+```
+
+
+```{r}
+importance_matrix |> 
+  ggplot(aes(x=Predictor, y=Standardized_Coefficient))+
+  geom_col() +
+  coord_flip() +
+  theme(legend.position = "none") +
+  labs(x = "Variables", y = "Importancia")
+```
+
